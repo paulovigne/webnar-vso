@@ -1,0 +1,759 @@
+= Guia de Configuração do Vault Secrets Operator (VSO) com Kubernetes
+:author: Paulo Vigne
+:revdate: 2026-06-15
+:toc: macro
+:toc-title: Sumário
+:numbered:
+
+toc::[]
+
+== Configuração de DNS
+Para testes locais, você pode usar o serviço de DNS público `sslip.io` ou como neste exemplo, criarei com meu domínio `vigne.com.br`.
+
+Teremos 3 VMs com os seguintes IPs e nomes de host:
+
+* VM1: 200.x.x.1 - k3s.vigne.com.br (api-k8s) e *.lab.vigne.com.br (Wildcard para subdomínios do ingress)
+* VM2: 200.x.x.2 - vault.vigne.com.br (Vault Server)
+* VM3: 200.x.x.3 - psql.vigne.com.br (PostgreSQL Server)
+
+== Instalação do K3S
+
+Instalação do K3S (Kubernetes leve) para testes locais.
+
+[source,bash]
+----
+curl -sfL https://k3s.io | sh -s - server --tls-san "k3s.vigne.com.br"
+----
+
+== Instalação do PostgreSQL
+
+Instalação do PostgreSQL para testes locais em vm docker.
+
+[source,bash]
+----
+docker run -d --name postgres-vso \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=goapp \
+  -p 5432:5432 \
+  postgres:15
+----
+
+== Instalação do Vault Secrets Operator
+
+Adiciona o repositório Helm do HashiCorp e instala o operador no namespace `vault-secrets-operator`.
+
+[source,bash]
+----
+helm repo add hashicorp https://helm.releases.hashicorp.com
+helm search repo hashicorp/vault-secrets-operator
+helm install --version 1.4.0 --create-namespace --namespace vault-secrets-operator vault-secrets-operator hashicorp/vault-secrets-operator
+----
+
+== Criação do ServiceAccount, Token para Revisão JWT e Certificado do K8S
+
+Cria uma ServiceAccount e um Token JWT usado pelo Vault para validar requisições Kubernetes (via `TokenReview` API).
+
+[source,bash]
+----
+kubectl -n vault-secrets-operator create serviceaccount vault-vso-reviewer
+----
+
+A ServiceAccount `vault-vso-reviewer` é a única que precisa receber a permissão da ClusterRole `system:auth-delegator`. A Função dela: Ela atua estritamente como o "revisor" de tokens (Token Reviewer) para o HashiCorp Vault. O Fluxo: Quando a sua aplicação tenta se autenticar, o Vault usa as credenciais dessa SA específica (vault-vso-reviewer) para bater na API do Kubernetes/OpenShift e validar se o token apresentado é legítimo. Para que funcione, você deve ter um ClusterRoleBinding ligando a `system:auth-delegator` diretamente a ela:
+
+[source,bash]
+----
+kubectl create clusterrolebinding vault-vso-reviewer-binding \
+  --clusterrole=system:auth-delegator \
+  --serviceaccount=vault-secrets-operator:vault-vso-reviewer
+----
+
+Agora geramos o token JWT para essa ServiceAccount, que será usado na configuração do Vault, salvando no arquivo reviewer.jwt:
+[source,bash]
+----
+kubectl -n vault-secrets-operator create token vault-vso-reviewer --duration=175200h > reviewer.jwt
+----
+
+[NOTE]
+.Parâmetros relevantes
+====
+* `--duration=175200h`: define validade do token (20 anos). Use conforme sua política de segurança.
+* `system:auth-delegator`: permissão necessária para delegar autenticação ao Vault.
+====
+
+== Configuração do Vault (Servidor Local, para testes rápidos)
+
+=== Geração de Certificado TLS para o Vault
+
+Gera certificado autoassinado para o Vault server.
+
+[source,bash]
+----
+mkdir ~/vault
+cd ~/vault
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout ~/vault/server.key -out ~/vault/server.crt \
+  -subj "/C=US/ST=State/L=City/O=Organization/OU=Unit/CN=vault.vigne.com.br" \
+  -addext "subjectAltName = DNS:vault.vigne.com.br, IP:127.0.0.1, IP:192.168.133.32, IP:200.222.222.222"
+----
+
+[NOTE]
+.Parâmetros
+====
+* `-days 365`: validade do certificado.
+* `-addext`: define nomes alternativos (DNS/IP) aceitos.
+====
+
+=== Instalação do Vault e Certificado no Sistema
+
+Instalação via apt
+[source,bash]
+----
+wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(grep -oP '(?<=UBUNTU_CODENAME=).*' /etc/os-release || lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+sudo apt update && sudo apt install vault
+----
+
+Copia os arquivos para os diretórios apropriados e atualiza o repositório de CA.
+
+[source,bash]
+----
+sudo cp ~/vault/server.crt /opt/vault/tls/tls.crt
+sudo cp ~/vault/server.key  /opt/vault/tls/tls.key
+sudo cp ~/vault/server.crt /usr/local/share/ca-certificates/
+sudo update-ca-certificates
+sudo systemctl restart vault
+----
+
+Vamos extrair o Certificado do K8S, do qual será necessário para o Vault validar os tokens JWT emitidos pelo Kubernetes. O comando abaixo conecta ao servidor K8S, extrai o certificado e salva em `k3s.crt`. Em seguida, copia para o diretório de certificados confiáveis do sistema e atualiza a lista de CAs.
+
+[source,bash]
+----
+sh -c "openssl s_client -connect 127.0.0.1:6443 -servername 127.0.0.1 </dev/null 2>/dev/null | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' > ~/vault/k3s.crt"
+sudo cp ~/vault/k3s.crt /usr/local/share/ca-certificates/
+sudo update-ca-certificates
+----
+* Onde `127.0.0.1` deve ser substituído pelo endereço do Cluster Kubernetes
+
+
+=== Inicialização e Desbloqueio do Vault
+
+**Guarde o Unsel e Root Token**
+
+[source,bash]
+----
+vault operator init -key-shares=1 -key-threshold=1
+vault operator unseal <unseal-key>
+vault login <root-token>
+----
+
+[WARNING]
+.Parâmetros
+====
+* `-key-shares=1` / `-key-threshold=1`: apenas para desenvolvimento. Em produção, use valores maiores (ex: 5/3).
+====
+
+== Configuração do Método de Autenticação Kubernetes
+
+Habilita o método `kubernetes` no Vault e configura a conexão com o cluster K8s.
+
+[source,bash]
+----
+vault auth enable -path k3s-vigne-com-br kubernetes
+----
+* **vault auth enable**: Ativa o motor de autenticação do Kubernetes.
+* **-path=k3s-vigne-com-br**: Define um caminho personalizado para esta autenticação. Isso permite que o mesmo Vault se conecte a múltiplos clusters (ex: um caminho para `k3s-vigne-com-br` e outro para `kubernetes-prod`).
+
+[source,bash]
+----
+cd ~/vault
+
+vault write auth/k3s-vigne-com-br/config \
+  kubernetes_host="https://k3s.vigne.com.br:6443" \
+  disable_local_ca_jwt=true \
+  disable_iss_validation=true \
+  kubernetes_ca_cert=@k3s.crt \
+  token_reviewer_jwt=@reviewer.jwt
+----
+
+[NOTE]
+.Parâmetros
+====
+* `kubernetes_host`: API server do Kubernetes.
+* `kubernetes_ca_cert`: certificado CA do cluster K8s.
+* `token_reviewer_jwt`: JWT do service account criado anteriormente.
+* `disable_local_ca_jwt` e `disable_iss_validation`: configurados para ambientes de teste com certificados autoassinados.
+====
+
+== Configuração do PKI (Secrets Engine)
+
+Cria um backend PKI para emissão de certificados TLS.
+
+[source,bash]
+----
+vault secrets enable -path pki-k3s-vigne-com-br pki
+vault secrets tune -max-lease-ttl=8760h pki-k3s-vigne-com-br
+----
+* **vault secrets enable**: Ativa o motor de PKI do Vault, mas em um caminho personalizado chamado /pki-k3s-vigne-com-br. Isso permite que você tenha várias CAs isoladas no mesmo Vault.vault
+* **secrets tune**: Ajusta o Tempo de Vida Máximo (TTL) dos certificados que este caminho pode emitir. O valor 8760h equivale exatamente a 1 ano. Nenhum certificado criado aqui poderá durar mais do que isso.
+
+
+[source,bash]
+----
+vault write pki-k3s-vigne-com-br/root/generate/internal \
+  common_name=lab.vigne.com.br ttl=8760h
+----
+
+* Cria uma **CA Raiz interna autoassinada** dentro do Vault.
+** O nome da autoridade (`common_name`) será o seu endereço IP mascarado com o serviço de DNS público sslip.io. O certificado dessa autoridade também terá a validade máxima de 1 ano (`8760h`).
+
+[source,bash]
+----
+vault write pki-k3s-vigne-com-br/config/urls \
+  issuing_certificates="http://vault.vigne.com.br:8200/v1/pki/ca" \
+  crl_distribution_points="http://vault.vigne.com.br:8200/v1/pki/crl"
+----
+* Injeta metadados dentro dos certificados que serão emitidos.
+* `issuing_certificates`: Diz aos clientes onde eles podem baixar o certificado da CA para verificar a cadeia de confiança.
+* `crl_distribution_points`: Diz aos clientes onde fica a Lista de Certificados Revogados (CRL), permitindo checar se um certificado foi cancelado antes do vencimento.
+* **Nota** : Como você usou 127.0.0.1, esses links só funcionarão dentro da própria máquina/pod do Vault. Para produção ou uso no OpenShift, o ideal é usar a URL da Rota do Vault.
+
+[source,bash]
+----
+vault write pki-k3s-vigne-com-br/roles/lab-vigne-com-br \
+  allowed_domains=lab.vigne.com.br \
+  allow_subdomains=true max_ttl=8760h
+----
+* Cria uma regra (Role) que define quem e como pode pedir certificados. É uma camada de segurança.
+* `allowed_domains` e `allow_subdomains=true`: Determina que esta role só aceitará emitir certificados para o domínio `lab.vigne.com.br` ou qualquer subdomínio dele (ex: `app.lab.vigne.com.br`). Qualquer pedido fora desse escopo será rejeitado.
+
+[source,bash]
+----
+vault write pki-k3s-vigne-com-br/issue/lab-vigne-com-br \
+  common_name=test.lab.vigne.com.br ttl=4320h
+----
+* Este comando efetivamente gera e entrega um certificado TLS válido.
+* Ele usa o molde da role criada no passo anterior para gerar um certificado para o subdomínio `test.lab.vigne.com.br` com validade de 6 meses (`4320h`). A resposta deste comando conterá a chave privada (`private_key`) e o certificado (`certificate`) prontos para uso.
+
+== Configuração do KV Secrets Engine (versão 2)
+
+Armazena segredos estáticos.
+
+[source,bash]
+----
+vault secrets enable -path=secret-k3s-vigne-com-br kv-v2
+----
+* **vault secrets enable**: Ativa o mecanismo de armazenamento do tipo Chave-Valor (Key-Value).
+* **-path=secret-k3s-vigne-com-br**: Cria um isolamento criando este cofre em um caminho personalizado. Assim como nos passos anteriores, isso ajuda a organizar o ambiente de desenvolvimento local.
+* **kv-v2**: Especifica a versão 2 do motor KV. A principal vantagem da V2 é que ela possui versionamento automático. Se você sobrescrever uma senha, o Vault guarda o histórico (Versão 1, Versão 2) e permite recuperar dados antigos ou deletados por acidente.
+
+**App1**
+[source,bash]
+----
+vault kv put secret-k3s-vigne-com-br/data/app1/app-secret user="paulo" pass="super_secret_pass"
+----
+
+**App2**
+[source,bash]
+----
+vault kv put secret-k3s-vigne-com-br/data/app2/app-secret user="vigne" pass="super_secret_pass"
+----
+
+* **vault kv put**: Grava (ou atualiza) dados no caminho especificado.
+* **secret-k3s-vigne-com-br/data/app1/app-secret**: `secret-k3s-vigne-com-br` é o caminho do motor que você ativou.
+* **/data/**: É um prefixo obrigatório inserido pelo próprio Vault na API da versão kv-v2 para indicar que estamos manipulando os dados brutos do segredo.
+* **app1/app-secret**: É a estrutura de pastas e o nome do segredo onde as informações ficarão guardadas.
+* **user="..." pass="..."**: São os pares de chave e valor que estão sendo guardados de forma segura dentro deste segredo.
+
+== Criação de Secret Engine para Credenciais Dinâmicas de Banco de Dados
+
+Além de segredos estáticos (KV) e certificados TLS (PKI), o Vault também pode gerar **credenciais de banco de dados dinâmicas** com tempo de vida limitado (leases). Este recurso é fundamental para ambientes que exigem:
+
+- **Segurança aprimorada:** Credenciais efêmeras que expiram automaticamente.
+- **Rotação automática:** Senhas são renovadas a cada novo lease.
+- **Princípio do menor privilégio:** Cada aplicação recebe credenciais com permissões específicas.
+- **Auditoria:** Cada acesso é registrado com um lease ID único.
+
+Com a utilização do recurso `VaultDynamicSecret`, permite consumir essas credenciais dinâmicas e disponibilizá-las como Secrets no Kubernetes.
+
+=== Configuração do PostgreSQL no Vault
+
+==== Habilitação do Backend Database
+
+Ativa o motor de banco de dados no Vault com caminho personalizado.
+
+[source,bash]
+----
+vault secrets enable -path pgsql-vigne-com-br database
+----
+
+* **`-path pgsql-vigne-com-br`**: Caminho personalizado para isolar a configuração do banco de dados.
+* **`database`**: Tipo do secrets engine (database).
+
+==== Configuração da Conexão com o PostgreSQL
+
+Define a conexão com o banco de dados PostgreSQL.
+
+[source,bash]
+----
+vault write pgsql-vigne-com-br/config/goapp \
+     plugin_name=postgresql-database-plugin \
+     connection_url="postgresql://{{username}}:{{password}}@psql.vigne.com.br:5432/goapp?sslmode=disable" \
+     allowed_roles="goapp" \
+     username="postgres" \
+     password="postgres"
+----
+
+[NOTE]
+.Parâmetros da conexão
+====
+* **`plugin_name`**: Plugin do Vault para PostgreSQL.
+* **`connection_url`**: URL de conexão com placeholders `{{username}}` e `{{password}}`.
+* **`allowed_roles`**: Lista de roles que podem usar esta configuração (apenas `goapp`).
+* **`username/password`**: Credenciais do usuário que o Vault usará para criar novos usuários.
+====
+
+==== Criação dos Scripts de Criação e Revogação
+
+Define os scripts SQL que o Vault executará ao criar (`creation_statements`) e revogar (`revocation_statements`) credenciais.
+
+**Script de Criação (`goapp-cre.sql`):**
+
+[source,bash]
+----
+tee goapp-cre.sql <<EOF
+CREATE ROLE "{{name}}" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}';
+GRANT ALL PRIVILEGES ON SCHEMA public TO "{{name}}";
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "{{name}}";
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO "{{name}}";
+EOF
+----
+
+* **`{{name}}`**: Placeholder para o nome do usuário gerado pelo Vault.
+* **`{{password}}`**: Placeholder para a senha gerada pelo Vault.
+* **`{{expiration}}`**: Data/hora de expiração do lease (usado no `VALID UNTIL`).
+* **`GRANT ALL PRIVILEGES`**: Concede permissões totais no esquema `public`.
+
+**Script de Revogação (`goapp-rev.sql`):**
+
+[source,bash]
+----
+tee goapp-rev.sql <<EOF
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM "{{name}}";
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM "{{name}}";
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM "{{name}}";
+DROP ROLE "{{name}}";
+EOF
+----
+
+* **`REVOKE ALL PRIVILEGES`**: Remove todas as permissões do usuário.
+* **`DROP ROLE`**: Remove o usuário do banco de dados.
+
+=== Criação da Role no Vault
+
+Define a role que gerencia as credenciais dinâmicas.
+
+[source,bash]
+----
+vault write pgsql-vigne-com-br/roles/goapp db_name=goapp \
+         creation_statements=@goapp-cre.sql \
+         revocation_statements=@goapp-rev.sql \
+         default_ttl=600 \
+         max_ttl=600
+----
+
+[NOTE]
+.Parâmetros da role
+====
+* **`db_name`**: Nome da configuração do banco (criada no passo anterior).
+* **`creation_statements`**: Script SQL executado ao criar um novo lease.
+* **`revocation_statements`**: Script SQL executado ao revogar um lease.
+* **`default_ttl`**: Tempo de vida padrão do lease (600 segundos = 10 minutos).
+* **`max_ttl`**: Tempo de vida máximo do lease (600 segundos).
+====
+
+[WARNING]
+.TTL e renovação
+====
+* O TTL de 600 segundos garante que as credenciais sejam efêmeras.
+* O ESO renovará automaticamente as credenciais baseado no `refreshInterval`.
+* Em produção, ajuste o TTL conforme a política de segurança da sua organização.
+====
+
+=== Teste de Credenciais no Vault
+
+==== Visualização de Leases Ativos
+
+Lista os leases ativos para a role `goapp`:
+
+[source,bash]
+----
+vault list sys/leases/lookup/pgsql-vigne-com-br/creds/goapp
+----
+
+==== Geração de Credenciais de Teste
+
+Gera e visualiza um par de credenciais:
+
+[source,bash]
+----
+vault read pgsql-vigne-com-br/creds/goapp
+----
+
+Exemplo de saída:
+----
+Key                Value
+---                -----
+lease_id           pgsql-vigne-com-br/creds/goapp/abc123
+lease_duration     600s
+password           s3cr3tP@ssw0rd
+username           v-token-goapp-xyz789
+----
+
+== Criação de Política de Acesso
+
+Este bloco de comandos cria uma Policy (Política de Acesso) no HashiCorp Vault chamada k3s-vigne-com-br.As policies no Vault funcionam sob o conceito de Default Deny (tudo é proibido por padrão). Portanto, este arquivo especifica exatamente quais caminhos (paths) e quais ações (capabilities) o detentor desta política poderá executar.Aqui está o detalhamento de cada bloco de permissão configurado no arquivo k3s-vigne-com-br-policy.hcl, definindo permissões para leitura de segredos e emissão de certificados.
+
+[source,bash]
+----
+cat >  ~/vault/k3s-vigne-com-br-policy.hcl <<EOF
+path "pki-k3s-vigne-com-br/issue/lab-vigne-com-br" {
+  capabilities = ["create", "update"]
+}
+path "pki-k3s-vigne-com-br/cert/*" {
+  capabilities = ["read"]
+}
+path "secret-k3s-vigne-com-br/*" {
+  capabilities = ["read"]
+}
+path "pgsql-vigne-com-br/creds/goapp" {
+  capabilities = ["read"]
+}
+EOF
+----
+* 1. O Caminho: Aponta especificamente para a Role de PKI que você criou anteriormente. As Ações (create, update): No Vault, para pedir/gerar um certificado novo através de uma Role, a API exige os verbos de escrita. Com isso, quem usar esta política ganha o direito de solicitar a geração de novos certificados baseados no molde daquela Role.
+* 2. O Caminho: O asterisco (*) é um caractere curinga (wildcard). Ele cobre qualquer subcaminho dentro de pki-k3s-vigne-com-br/cert/. Quando um certificado é gerado, ele ganha um número de série e fica salvo nessa estrutura (ex: pki-k3s-vigne-com-br/cert/01-ab-cd...). A Ação (read): Permite que o cliente baixe ou consulte a chave pública de certificados que já foram emitidos anteriormente por esta CA.
+* 3. O Caminho: Dá acesso a toda a estrutura do motor de segredos KV que você ativou no passo anterior. Isso inclui as pastas do app1/app-secret, app2/app-secret e qualquer outra que venha a ser criada ali dentro. A Ação (read): Permite apenas ler os segredos (buscar o usuário e a senha). Quem tiver essa política não poderá criar novos segredos, deletar ou modificar os atuais, garantindo que as aplicações tenham acesso de "apenas leitura".
+* 4. O Caminho: Aponta para a Role de banco de dados que você configurou. A Ação (read): Permite que o cliente solicite credenciais dinâmicas (usuário e senha) para acessar o banco de dados PostgreSQL. O Vault vai gerar um usuário temporário com permissões limitadas, válido apenas pelo tempo definido no TTL da Role.
+
+[source,bash]
+----
+vault policy write k3s-vigne-com-br  ~/vault/k3s-vigne-com-br-policy.hcl
+----
+* Este comando pega o arquivo de texto que você acabou de criar e o envia para o Vault com o nome de k3s-vigne-com-br. A partir deste momento, a política está registrada e pronta para ser associada a uma Role de autenticação do Kubernetes.
+
+== Criação do Role no Vault para Kubernetes Auth
+
+Associa ServiceAccounts do Kubernetes a uma política do Vault.
+
+[source,bash]
+----
+vault write auth/k3s-vigne-com-br/role/k3s-vigne-com-br \
+  bound_service_account_names="vault-vso,vault-eso" \
+  bound_service_account_namespaces="*" \
+  policies="default,k3s-vigne-com-br" \
+  audience=k3s-vigne-com-br \
+  ttl=2h
+----
+* `auth/k3s-vigne-com-br/role/k3s-vigne-com-br`: Cria uma regra de login chamada k3s-vigne-com-br. Quando o seu operador (VSO) ou aplicação for se autenticar no Vault, ele precisará dizer explicitamente que deseja logar usando esta role.
+* `bound_service_account_names="vault-vso"`: Restrição de Segurança: O Vault só vai aceitar o login se a ServiceAccount que estiver tentando autenticar se chamar exatamente vault-vso. Lembra que você mencionou que cria uma SA com esse nome em cada namespace de aplicação? É aqui que elas são autorizadas.
+* `bound_service_account_namespaces="\*"`: O caractere curinga (*) significa que a ServiceAccount vault-vso pode vir de qualquer namespace do cluster. Se você tiver o vault-vso rodando no namespace app1, app2 ou frontend, todos serão aceitos, desde que o nome da SA seja idêntico.
+* `policies="default,k3s-vigne-com-br"`: O que ela ganha: Se o token da ServiceAccount for válido e passar pelas regras acima, o Vault emitirá um token de acesso próprio. Este token terá anexado a política default (padrão do Vault) e a política k3s-vigne-com-br (que criamos no passo anterior, permitindo ler os segredos KV e emitir certificados PKI).
+* `audience=k3s-vigne-com-br`: Define a audiência esperada no token JWT enviado pelo Kubernetes. Quando os clusters modernos do Kubernetes geram tokens para ServiceAccounts, eles embutem um campo de audiência para evitar que o token seja usado de forma maliciosa em outros lugares. O Vault vai rejeitar o token se o campo de audiência não bater.
+* `ttl=2h`: Define o Tempo de Vida (Time To Live) do token do Vault gerado após o login. Ele será válido por 2 horas. Após esse período, o VSO precisará renovar o token ou realizar um novo login automaticamente.
+
+== Recursos Kubernetes do VSO
+
+=== Criação de Namespaces e ServiceAccounts
+
+[source,bash]
+----
+kubectl create ns app1
+kubectl create sa vault-vso -n app1 --dry-run=client -o json \
+  | jq '.automountServiceAccountToken=false' \
+  | kubectl apply -f -
+----
+* `kubectl create ns app1`: Cria um novo namespace isolado chamado app1. É aqui que rodarão os Pods, Deployments e Services desta aplicação.
+* `kubectl create sa vault-vso -n app1`: Cria a ServiceAccount vault-vso especificamente dentro do escopo de app1.
+Como vimos na configuração da Role do Vault (bound_service_account_names="vault-vso"), esta identidade agora tem o direito de bater no Vault e reivindicar a política k3s-vigne-com-br para ler os segredos da pasta secret-k3s-vigne-com-br/data/app1/app-secret.
+
+[source,bash]
+----
+kubectl create ns app2
+kubectl create sa vault-vso -n app2 --dry-run=client -o json \
+  | jq '.automountServiceAccountToken=false' \
+  | kubectl apply -f -
+----
+* `kubectl create ns app2`: Cria um novo namespace (espaço de nomes) isolado chamado app2.
+* `kubectl create sa vault-vso -n app2`: Cria a ServiceAccount vault-vso especificamente dentro do escopo de app2.
+* A ServiceAccount criada aqui também se chama vault-vso. Graças ao parâmetro bound_service_account_namespaces="*" que você configurou na Role do Vault, o Vault aceitará o login vindo tanto do namespace app1 quanto do app2.
+
+== Deploy do VaultConnection e VaultAuth
+
+Este bloco de código define os dois recursos customizados (CRDs) fundamentais do **Vault Secrets Operator ** (VSO) para estabelecer a conexão e a autenticação com o Vault a partir do namespace app1.Eles traduzem em código do Kubernetes toda a infraestrutura que você configurou nos passos anteriores. Aqui está a descrição detalhada de cada bloco e seus parâmetros:
+
+Arquivo de exemplo (`vault-auth-per-ns.yaml`):
+
+[source,yaml]
+----
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultConnection
+metadata:
+  name: vaultconnection
+  namespace: app1
+spec:
+  address: 'https://vault.vigne.com.br:8200'
+  skipTLSVerify: true
+----
+* **O que faz**: Funciona como a "lista telefônica" do operador. Ele apenas aponta onde o servidor do Vault está localizado fisicamente na rede.
+* `address`: Aponta para o HostName/IP e porta do seu servidor Vault (https://vault.vigne.com.br:8200), que foi o mesmo IP usado na configuração da audiência e dos certificados.
+* `skipTLSVerify`: true: Como você está testando em um ambiente de desenvolvimento local (k3s-vigne-com-br) e provavelmente utilizando certificados autoassinados (gerados no bloco do PKI), essa flag diz ao operador para aceitar a conexão HTTPS mesmo sem validar a cadeia de certificados raiz, evitando erros de handshake SSL no ambiente de testes.
+
+[source,yaml]
+----
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultAuth
+metadata:
+  name: vaultauth
+  namespace: app1
+spec:
+  kubernetes:
+    role: k3s-vigne-com-br
+    serviceAccount: vault-vso
+    tokenExpirationSeconds: 600
+    audiences:
+      - "k3s-vigne-com-br"
+  method: kubernetes
+  mount: k3s-vigne-com-br
+  vaultConnectionRef: vaultconnection
+----
+* **O que faz**: Define a identidade e o método que o operador usará para conseguir um token válido dentro do Vault.
+* `role`: k3s-vigne-com-br: Aponta para a Role do Vault que criamos no comando anterior (vault write auth/k3s-vigne-com-br/role/k3s-vigne-com-br).
+* `serviceAccount`: vault-vso: Diz ao operador para pegar o token JWT da ServiceAccount local que você acabou de criar no namespace app1 para fazer o login.
+* `tokenExpirationSeconds`: 600: Solicita ao Kubernetes um token com tempo de expiração curto (10 minutos) para enviar ao Vault. O VSO renovará esse token automaticamente, garantindo maior segurança rotativa.
+* `audiences`: Define o campo aud do token JWT do Kubernetes para bater exatamente com o que você configurou na Role do Vault (audience=k3s-vigne-com-br). Se essa string não for idêntica, o Vault rejeitará o login.
+* `method`: kubernetes e `mount`: k3s-vigne-com-br: Especifica que o login deve ser feito via motor do Kubernetes, utilizando o caminho personalizado (k3s-vigne-com-br) que ativamos anteriormente.
+* `vaultConnectionRef`: Associa este bloco de autenticação às coordenadas de rede definidas no VaultConnection acima.
+
+Como este arquivo especificamente é para o namespace app1, as aplicações desse namespace já conseguirão se autenticar. Para habilitar o namespace app2, basta duplicar esses dois blocos no mesmo arquivo, alterando apenas o campo namespace: app1 para namespace: app2. O restante dos parâmetros continuará idêntico, pois a Role do Vault aceita qualquer namespace (*).
+
+[source,yaml]
+----
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultPKISecret
+metadata:
+  name: app1-pki
+  namespace: app1
+spec:
+  vaultAuthRef: vaultauth
+  expiryOffset: 10s
+  ttl: 30d
+  clear: true
+  destination:
+    create: true
+    name: app1-tls
+    overwrite: true
+    transformation: {}
+    type: kubernetes.io/tls
+  role: lab-vigne-com-br
+  commonName: app1.lab.vigne.com.br
+  format: pem
+  mount: pki-k3s-vigne-com-br
+  altNames:
+    - app1.lab.vigne.com.br
+----
+
+[NOTE]
+.Parâmetros do VaultPKISecret
+====
+* `expiryOffset`: renovação automática antes do vencimento.
+* `clear`: remove segredo antigo ao deletar o recurso.
+* `destination.type`: tipo de segredo Kubernetes (ex: `kubernetes.io/tls`).
+====
+
+[source,yaml]
+----
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultStaticSecret
+metadata:
+  name: app1-static
+  namespace: app1
+spec:
+  vaultAuthRef: vaultauth
+  mount: secret-k3s-vigne-com-br
+  type: kv-v2
+  path: data/app1/app-secret
+  destination:
+    name: app1-secret
+    create: true
+    overwrite: true
+    transformation:
+      excludeRaw: true
+      excludes:
+      - ".*"
+      templates:
+        USERNAME:
+          text: "{{ get .Secrets \"user\" }}"
+        PASSWORD:
+          text: "{{ get .Secrets \"pass\" }}"
+----
+
+* `Transformation`: Permite extrair campos específicos do segredo Vault e expô-los como chaves separadas no Kubernetes. Esta é a parte mais interessante do seu manifesto, pois ela limpa os dados brutos e os reestrutura:
+** `excludeRaw`: true: Por padrão, o VSO joga todos os dados encontrados no Vault direto para a Secret do Kubernetes. Esta flag desativa esse comportamento automático para que você tenha controle total do formato final.
+** `excludes`: - ".*": Usa uma expressão regular (Regex) para excluir e apagar todas as chaves originais vindas do Vault (user e pass) da Secret final do Kubernetes.
+** `templates` (Remapeamento com Go Templates): Como você apagou as chaves originais, este bloco cria novas chaves personalizadas para a Secret do Kubernetes:
+*** `USERNAME`: O operador cria uma chave chamada `USERNAME` e injeta nela o valor extraído da chave "user" do Vault (paulo).
+*** `PASSWORD`: O operador cria uma chave chamada `PASSWORD` e injeta nela o valor extraído da chave "pass" do Vault (super_secret_pass).
+
+
+[source,yaml]
+----
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultDynamicSecret
+metadata:
+  name: goapp-creds
+  namespace: app1
+spec:
+  mount: pgsql-vigne-com-br
+  path: creds/goapp
+  leaseDuration: 600s
+  refreshInterval: 300s
+  destination:
+    create: true
+    name: goapp-db-creds
+    overwrite: true
+  rolloutRestartTargets:
+    - kind: Deployment
+      name: goapp
+  vaultAuthRef: vaultauth
+----
+* `leaseDuration`: define o tempo de vida do lease (credenciais efêmeras).
+* `refreshInterval`: define o intervalo de renovação automática do lease.
+* `rolloutRestartTargets`: lista de recursos que serão reiniciados quando o lease for renovado, garantindo que a aplicação pegue as novas credenciais.
+
+== Aplicando os Recursos
+
+Todos os recursos YAML podem ser aplicados com:
+
+[source,bash]
+----
+kubectl apply -f <arquivo.yaml>
+----
+
+== Extra: ESO (External Secrets Operator)
+
+=== Instalação do External Secrets Operator
+
+Adiciona o repositório Helm do External Secrets e instala o operador no namespace `external-secrets`.
+
+[source,bash]
+----
+helm repo add external-secrets https://charts.external-secrets.io
+helm search repo external-secrets
+helm install --version 2.6.0 --create-namespace \
+  --namespace external-secrets external-secrets \
+  external-secrets/external-secrets
+----
+
+=== Criação do Secret com Certificado CA do Vault
+
+Cria um Secret contendo o certificado CA do Vault para validação TLS. O mesmo server.crt usado no VSO deve ser usado aqui.
+
+[source,bash]
+----
+kubectl create secret generic vault-ca-cert-secret \
+  --namespace app2 \
+  --from-file=ca.crt=server.crt
+----
+
+* `vault-ca-cert-secret`: Nome do Secret que armazenará o certificado.
+* `ca.crt=server.crt`: O arquivo `server.crt` deve ser o certificado CA do seu servidor Vault.
+
+=== Criação das ServiceAccounts
+
+Cria duas ServiceAccounts no namespace `app2`:
+
+[source,bash]
+----
+kubectl create sa vault-eso --namespace app2
+----
+
+* `vault-eso`: ServiceAccount utilizada pelo ESO para se autenticar no Vault.
+
+=== SecretStore para Vault
+
+Cria um `SecretStore` que será utilizado pelo ESO para se conectar ao Vault. Este recurso define como o ESO deve se autenticar e onde buscar os segredos.
+
+[source,yaml]
+----
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: vault-secretstore
+  namespace: app2
+spec:
+  provider:
+    vault:
+      server: "https://vault.vigne.com.br:8200"
+      version: "v2"
+      caProvider:
+        type: "Secret"
+        name: "vault-ca-cert-secret"
+        key: "ca.crt"
+      auth:
+        kubernetes:
+          mountPath: "k3s-vigne-com-br"
+          role: "k3s-vigne-com-br"
+          serviceAccountRef:
+            name: "vault-eso"
+----
+
+=== Configuração de Segredos Estáticos (KV)
+
+Sincroniza segredos estáticos do Vault para o Kubernetes.
+
+[source,yaml]
+----
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: app2-static
+  namespace: app2
+spec:
+  refreshInterval: "1m"
+  secretStoreRef:
+    name: vault-secretstore
+    kind: SecretStore
+  target:
+    name: app2-secret
+    creationPolicy: Owner
+    deletionPolicy: Delete
+  data:
+    - secretKey: USERNAME
+      remoteRef:
+        key: "secret-dev-local/data/data/app2/app-secret"
+        property: "user"
+    - secretKey: PASSWORD
+      remoteRef:
+        key: "secret-dev-local/data/data/app2/app-secret"
+        property: "pass"
+----
+
+* **`namespace: app2`**: O ExternalSecret é criado no namespace da aplicação.
+* **`secretStoreRef`**: Referencia o `SecretStore` criado anteriormente, que contém as informações de conexão e autenticação com o Vault.
+* **`data`**: Mapeia cada propriedade do Vault para uma chave específica no Secret Kubernetes.
+* **`key`**: Caminho completo no Vault (incluindo `/data/` duas vezes, devido à estrutura da API v2).
+* **`property`**: Propriedade específica dentro do segredo Vault (`user` ou `pass`).
+
+[NOTE]
+.Diferença para o VSO
+====
+Diferentemente do VSO, que utiliza transformações complexas com templates, o ESO permite mapeamento direto de propriedades via `data` e `remoteRef.property`, tornando a configuração mais simples e intuitiva para segredos estáticos.
+====
+
+== Considerações Finais
+
+* **Segurança:** evite `skipTLSVerify: true` em produção.
+* **Rotação de Tokens:** o VSO renova automaticamente o token JWT antes do vencimento (`tokenExpirationSeconds`).
+* **Auditoria:** todos os acessos ao Vault ficam registrados no audit log do Vault.
+* **Compatibilidade:** este guia foi testado com VSO 1.4.0 e Vault 1.15+.
