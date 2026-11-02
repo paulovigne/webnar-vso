@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    app: goapp
+  name: goapp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: goapp
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: goapp
+        tier: frontend
+    spec:
+      securityContext:
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      restartPolicy: Always
+      initContainers:
+      - name: migrate
+        envFrom:
+        - secretRef:
+            name: goapp-connection
+        image: paulovigne/goapp-crud:latest
+        command: ['sh', '-c', "/app/migrate"]
+        resources:
+          requests:
+            cpu: 125m
+            memory: 128Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+      containers:
+      - name: goapp
+        envFrom:
+        - secretRef:
+            name: goapp-connection
+        image: paulovigne/goapp-crud:latest
+        resources:
+          requests:
+            cpu: 125m
+            memory: 128Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+        securityContext:
+          runAsNonRoot: true
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+        ports:
+        - containerPort: 8080
+          name: tcp-goapp
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /api/user/0
+            port: tcp-goapp
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /api/user/0
+            port: tcp-goapp
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3

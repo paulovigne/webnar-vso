@@ -2,7 +2,6 @@ apiVersion: secrets.hashicorp.com/v1beta1
 kind: VaultAuth
 metadata:
   name: vaultauth
-  namespace: app1
 spec:
   kubernetes:
     role: k3s-vigne-com-br

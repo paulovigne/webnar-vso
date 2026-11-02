@@ -1,0 +1,19 @@
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultDynamicSecret
+metadata:
+  name: goapp-creds
+spec:
+  mount: pgsql-vigne-com-br
+  path: creds/goapp
+  destination:
+    create: true
+    name: goapp-db-creds
+    overwrite: true
+  rolloutRestartTargets:
+    - kind: Deployment
+      name: goapp
+  vaultAuthRef: vaultauth
+  transformation:
+      templates:
+        POSTGRES_URL:
+          text: "postgres://{{ .Secret.username }}:{{ .Secret.password }}@psql.vigne.com.br:5432/goapp?sslmode=disable"  

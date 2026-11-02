@@ -1,0 +1,21 @@
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultStaticSecret
+metadata:
+  name: webapp-static
+spec:
+  vaultAuthRef: vaultauth
+  mount: secret-k3s-vigne-com-br
+  type: kv-v2
+  path: data/webapp/color-secret
+  destination:
+    name: env-vars
+    create: true
+    overwrite: true
+    transformation:
+      excludeRaw: true
+      excludes:
+      - ".*"
+      templates:
+        APP_COLOR:
+          text: "{{ get .Secrets \"color\" }}"
+# vault kv put secret-k3s-vigne-com-br/data/webapp/color-secret color="blue"          

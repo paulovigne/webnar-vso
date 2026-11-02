@@ -1,0 +1,7 @@
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultConnection
+metadata:
+  name: vaultconnection
+spec:
+  address: 'https://vault.vigne.com.br:8200'
+  skipTLSVerify: true
