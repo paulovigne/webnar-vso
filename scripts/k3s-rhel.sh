@@ -7,6 +7,8 @@ curl -sfL https://get.k3s.io | sh -s - server --tls-san "$K3S_DNSNAME"
 
 curl -sSL https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
 
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
 helm repo add hashicorp https://helm.releases.hashicorp.com
 helm repo add external-secrets https://charts.external-secrets.io
 

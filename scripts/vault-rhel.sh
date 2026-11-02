@@ -11,10 +11,12 @@ POSTGRESQL_PORT="5432"
 
 mkdir ~/vault
 cd ~/vault
+
 openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
   -keyout ~/vault/server.key -out ~/vault/server.crt \
   -subj "/C=US/ST=State/L=City/O=Organization/OU=Unit/CN=${EXT_VAULT_DNSNAME}" \
-  -addext "subjectAltName = DNS:${EXT_VAULT_DNSNAME}, IP:127.0.0.1, IP:$(hostname -I | awk '{print $1}'), IP:${EXT_VAULT_IPADDR}"
+  -addext "subjectAltName = DNS:${EXT_VAULT_DNSNAME}, IP:127.0.0.1, IP:$(hostname -I | awk '{print $1}'), IP:${EXT_VAULT_IPADDR}" \
+  -set_serial 1
 
 yum install -y yum-utils shadow-utils
 yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
