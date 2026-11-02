@@ -22,7 +22,7 @@ Instalação do K3S (Kubernetes leve) para testes locais.
 
 [source,bash]
 ----
-curl -sfL https://k3s.io | sh -s - server --tls-san "k3s.vigne.com.br"
+curl -sfL https://get.k3s.io | sh -s - server --tls-san "k3s.vigne.com.br"
 ----
 
 == Instalação do PostgreSQL

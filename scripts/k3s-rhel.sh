@@ -3,14 +3,14 @@
 K3S_DNSNAME="k3s.vigne.com.br"
 VAULT_DNSNAME="vault.vigne.com.br"
 
-curl -sfL https://k3s.io | sh -s - server --tls-san "$K3S_DNSNAME"
+curl -sfL https://get.k3s.io | sh -s - server --tls-san "$K3S_DNSNAME"
 
-sh -c "openssl s_client -connect ${VAULT_DNSNAME}:8200 -servername ${VAULT_DNSNAME} </dev/null 2>/dev/null | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' > vault.crt"
-cp vault.crt /etc/pki/ca-trust/source/anchors/
-update-ca-trust
+curl -sSL https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
 
 helm repo add hashicorp https://helm.releases.hashicorp.com
 helm repo add external-secrets https://charts.external-secrets.io
+
+helm repo update
 
 helm install --version 1.4.0 --create-namespace \
   --namespace vault-secrets-operator vault-secrets-operator \
@@ -38,8 +38,14 @@ kubectl create sa vault-vso -n app2 --dry-run=client -o json \
   | jq '.automountServiceAccountToken=false' \
   | kubectl apply -f -
 
+kubectl create sa vault-eso --namespace app2
+
+exit
+
+sh -c "openssl s_client -connect ${VAULT_DNSNAME}:8200 -servername ${VAULT_DNSNAME} </dev/null 2>/dev/null | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' > vault.crt"
+cp vault.crt /etc/pki/ca-trust/source/anchors/
+update-ca-trust
+
 kubectl create secret generic vault-ca-cert-secret \
   --namespace app2 \
   --from-file=ca.crt=vault.crt
-
-kubectl create sa vault-eso --namespace app2
