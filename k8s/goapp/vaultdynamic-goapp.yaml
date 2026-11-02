@@ -7,13 +7,16 @@ spec:
   path: creds/goapp
   destination:
     create: true
-    name: goapp-db-creds
+    name: goapp-connection
     overwrite: true
+    transformation:
+      excludes:
+        - .*
+      templates:
+        POSTGRES_URL:
+          text: >-
+            postgres://{{ get .Secrets "username" }}:{{ get .Secrets "password" }}@psql.vigne.com.br:5432/goapp?sslmode=disable
   rolloutRestartTargets:
     - kind: Deployment
       name: goapp
   vaultAuthRef: vaultauth
-  transformation:
-      templates:
-        POSTGRES_URL:
-          text: "postgres://{{ .Secret.username }}:{{ .Secret.password }}@psql.vigne.com.br:5432/goapp?sslmode=disable"  

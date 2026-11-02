@@ -27,7 +27,7 @@ spec:
       restartPolicy: Always
       containers:
       - name: frontend
-        imagePullPolicy: Never
+        imagePullPolicy: Always
         image: paulovigne/frontend-goapp:v1
         resources:
           requests:
