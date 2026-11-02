@@ -4,7 +4,7 @@
 K3S_DNSNAME="k3s.vigne.com.br"
 
 # Instala o servidor K3s com suporte ao DNS informado, permitindo acesso externo ao cluster.
-curl -sfL https://get.k3s.io | sh -s - server --tls-san "$K3S_DNSNAME"
+curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.37.1+k3s1 sh -s - server --tls-san "$K3S_DNSNAME"
 
 # Instala o Helm 3 para gerenciar os charts de operadores e integrações.
 curl -sSL https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
