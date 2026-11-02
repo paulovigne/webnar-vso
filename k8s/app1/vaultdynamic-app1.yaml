@@ -1,0 +1,18 @@
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultDynamicSecret
+metadata:
+  name: goapp-creds
+  namespace: app1
+spec:
+  mount: pgsql-vigne-com-br
+  path: creds/goapp
+  leaseDuration: 600s
+  refreshInterval: 300s
+  destination:
+    create: true
+    name: goapp-db-creds
+    overwrite: true
+  rolloutRestartTargets:
+    - kind: Deployment
+      name: goapp
+  vaultAuthRef: vaultauth

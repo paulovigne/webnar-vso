@@ -1,0 +1,23 @@
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultStaticSecret
+metadata:
+  name: app1-static
+  namespace: app1
+spec:
+  vaultAuthRef: vaultauth
+  mount: secret-k3s-vigne-com-br
+  type: kv-v2
+  path: data/app1/app-secret
+  destination:
+    name: app1-secret
+    create: true
+    overwrite: true
+    transformation:
+      excludeRaw: true
+      excludes:
+      - ".*"
+      templates:
+        USERNAME:
+          text: "{{ get .Secrets \"user\" }}"
+        PASSWORD:
+          text: "{{ get .Secrets \"pass\" }}"
