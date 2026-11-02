@@ -6,7 +6,7 @@ metadata:
     app: webapp    
 spec:
   rules:
-  - host: webapp.LB-IP-ADDR.sslip.io
+  - host: webapp.lab.vigne.com.br
     http:
       paths:
       - backend:
@@ -16,6 +16,7 @@ spec:
               number: 8080
         path: /
         pathType: Prefix
-  tls:
-  - hosts:
-      - webapp.LB-IP-ADDR.sslip.io
+#  tls:
+#    - hosts:
+#        - webapp.lab.vigne.com.br
+#      secretName: webapp-tls

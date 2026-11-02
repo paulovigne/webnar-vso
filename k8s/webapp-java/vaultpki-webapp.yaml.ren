@@ -1,0 +1,21 @@
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultPKISecret
+metadata:
+  name: webapp-pki
+spec:
+  vaultAuthRef: vaultauth
+  expiryOffset: 10s
+  ttl: 30d
+  clear: true
+  destination:
+    create: true
+    name: webapp-tls
+    overwrite: true
+    transformation: {}
+    type: kubernetes.io/tls
+  role: lab-vigne-com-br
+  commonName: webapp.lab.vigne.com.br
+  format: pem
+  mount: pki-k3s-vigne-com-br
+  altNames:
+    - webapp.lab.vigne.com.br
