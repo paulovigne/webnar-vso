@@ -1,7 +1,6 @@
 #!/bin/bash
 
 K3S_DNSNAME="k3s.vigne.com.br"
-VAULT_DNSNAME="vault.vigne.com.br"
 
 curl -sfL https://get.k3s.io | sh -s - server --tls-san "$K3S_DNSNAME"
 
@@ -36,18 +35,6 @@ kubectl create sa vault-vso -n app1 --dry-run=client -o json \
   | kubectl apply -f -
 
 kubectl create ns app2
-kubectl create sa vault-vso -n app2 --dry-run=client -o json \
+kubectl create sa vault-eso -n app2 --dry-run=client -o json \
   | jq '.automountServiceAccountToken=false' \
   | kubectl apply -f -
-
-kubectl create sa vault-eso --namespace app2
-
-exit
-
-sh -c "openssl s_client -connect ${VAULT_DNSNAME}:8200 -servername ${VAULT_DNSNAME} </dev/null 2>/dev/null | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' > vault.crt"
-cp vault.crt /etc/pki/ca-trust/source/anchors/
-update-ca-trust
-
-kubectl create secret generic vault-ca-cert-secret \
-  --namespace app2 \
-  --from-file=ca.crt=vault.crt

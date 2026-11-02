@@ -1,21 +1,28 @@
 #!/bin/bash
 
 EXT_VAULT_DNSNAME="vault.vigne.com.br"
-EXT_VAULT_IPADDR="200.222.222.222"
 EXT_K8S_DNSNAME="k3s.vigne.com.br"
-TOKEN_REVIEWER_JWT="eyJhbGciOiJSUzI1NiIsImtpZCI6InB1YmxpYy1rZXktMSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJrdWJlLXN5c3RlbSIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50Lm5hbWUiOiJyZXZpZXdlciIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6IjE4ZjU4ZjA0LTk0NzAtNDg4NS05Njk4LWQxMDAwMDAwMDAwMCIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnNlcnZpY2UtYWNjb3VudC51aWQiOiIxOGY1OGYwNC05NDcwLTQ4ODUtOTY5OC1kMTAwMDAwMDAwMDAiLCJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQ6a3ViZS1zeXN0ZW06cmV2aWV3ZXIiLCJhdWQiOlsiaHR0cHM6Ly9rdWJlcm5ldGVzLndpa2lwZWRpYS5vcmcvdGVzdC9hcGkiXSwiaWF0IjoxNzAxMjE4MDI4LCJleHAiOjE3MDEyMjE2Mjh9.CT7n7qfH7b"
-POSTGRESQL_PASSWORD="postgres"
-POSTGRESQL_USERNAME="postgres"
 POSTGRESQL_HOST="psql.vigne.com.br"
 POSTGRESQL_PORT="5432"
+POSTGRESQL_PASSWORD="postgres"
+POSTGRESQL_USERNAME="postgres"
+TOKEN_REVIEWER_JWT=$(cat reviewer.jwt)
+
+if [ -z "$TOKEN_REVIEWER_JWT" ]; then
+  echo "Error: TOKEN_REVIEWER_JWT is not set. Please ensure the reviewer.jwt file exists and contains the correct token."
+  exit 1
+fi
 
 mkdir ~/vault
 cd ~/vault
 
+EXT_VAULT_IPADDR=$(dig +short ${EXT_VAULT_DNSNAME} | head -n 1)
+INT_VAULT_IPADDR=$(hostname -I | awk '{print $1}')
+
 openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
   -keyout ~/vault/server.key -out ~/vault/server.crt \
   -subj "/C=US/ST=State/L=City/O=Organization/OU=Unit/CN=${EXT_VAULT_DNSNAME}" \
-  -addext "subjectAltName = DNS:${EXT_VAULT_DNSNAME}, IP:127.0.0.1, IP:$(hostname -I | awk '{print $1}'), IP:${EXT_VAULT_IPADDR}" \
+  -addext "subjectAltName = DNS:${EXT_VAULT_DNSNAME}, IP:127.0.0.1, IP:${INT_VAULT_IPADDR}, IP:${EXT_VAULT_IPADDR}" \
   -set_serial 1
 
 yum install -y yum-utils shadow-utils
