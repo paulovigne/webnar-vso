@@ -18,4 +18,7 @@ spec:
       templates:
         APP_COLOR:
           text: "{{ get .Secrets \"color\" }}"
+#  rolloutRestartTargets:
+#    - kind: Deployment
+#      name: webapp          
 # vault kv put secret-k3s-vigne-com-br/data/webapp/color-secret color="blue"          
