@@ -87,7 +87,7 @@ locals {
 locals {
   custom-data-docker = <<CUSTOM_DATA
 #!/bin/bash
-yum -y install wget jq git socat conntrack ipset docker iptables
+yum -y install wget jq git socat conntrack ipset docker iptables vim bind-utils
 sysctl -w net.ipv4.conf.all.forwarding=1
 systemctl start docker && systemctl enable docker
 wget https://github.com/docker/compose/releases/download/v2.23.3/docker-compose-Linux-x86_64
