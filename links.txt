@@ -1,0 +1,7 @@
+curl -sfL https://raw.githubusercontent.com/paulovigne/webnar-vso/refs/heads/main/scripts/k3s-rhel.sh | sh -
+curl -sfL https://raw.githubusercontent.com/paulovigne/webnar-vso/refs/heads/main/scripts/pgsql-rhel.sh | sh -
+curl -sfL https://raw.githubusercontent.com/paulovigne/webnar-vso/refs/heads/main/scripts/vault-rhel.sh | sh -
+
+curl -sfL https://raw.githubusercontent.com/paulovigne/webnar-vso/refs/heads/main/scripts/eso-app2-ca-cert.sh | sh -
+
+git clone https://github.com/paulovigne/webnar-vso.git
