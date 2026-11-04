@@ -1,6 +1,7 @@
 #!/bin/bash
 
 kubectl -n argocd apply --server-side --force-conflicts -f https://raw.githubusercontent.com/argoproj/argo-cd/refs/tags/stable/manifests/install.yaml
+kubectl -n argocd wait --for=condition=available --timeout=300s deployment/argocd-server
 
 cat <<EOF | kubectl apply -f -
 apiVersion: traefik.io/v1alpha1
@@ -38,3 +39,10 @@ metadata:
   name: argocd-cmd-params-cm
   namespace: argocd    
 EOF
+
+kubectl -n argocd rollout restart deployment argocd-server
+echo "Waiting for ArgoCD to be ready..."
+kubectl wait --for=condition=available --timeout=300s deployment/argocd-server -n argocd
+echo
+echo "ArgoCD URL: https://argocd.lab.vigne.com.br"
+echo "ArgoCD Admin Password: $(kubectl -n argocd get secret argocd-initial-admin-secret -o json | jq -r .data.password | base64 -d)"
