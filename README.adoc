@@ -616,8 +616,6 @@ metadata:
 spec:
   mount: pgsql-vigne-com-br
   path: creds/goapp
-  leaseDuration: 600s
-  refreshInterval: 300s
   destination:
     create: true
     name: goapp-db-creds
@@ -706,6 +704,8 @@ spec:
           role: "k3s-vigne-com-br"
           serviceAccountRef:
             name: "vault-eso"
+            audiences:
+            - "k3s-vigne-com-br"
 ----
 
 === Configuração de Segredos Estáticos (KV)
