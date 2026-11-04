@@ -704,6 +704,8 @@ spec:
           role: "k3s-vigne-com-br"
           serviceAccountRef:
             name: "vault-eso"
+            audiences:
+            - "k3s-vigne-com-br"
 ----
 
 === Configuração de Segredos Estáticos (KV)
