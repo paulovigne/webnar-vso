@@ -1,5 +1,7 @@
 #!/bin/bash
 
+ARGOCD_HOSTNAME="argocd.lab.vigne.com.br"
+
 kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n argocd apply --server-side --force-conflicts -f https://raw.githubusercontent.com/argoproj/argo-cd/refs/tags/stable/manifests/install.yaml
 kubectl -n argocd wait --for=condition=available --timeout=300s deployment/argocd-server
@@ -15,13 +17,13 @@ spec:
     - websecure
   routes:
     - kind: Rule
-      match: Host(\`argocd.lab.vigne.com.br\`)
+      match: Host(\`$ARGOCD_HOSTNAME\`)
       priority: 10
       services:
         - name: argocd-server
           port: 80
     - kind: Rule
-      match: Host(\`argocd.lab.vigne.com.br\`) && Header(\`Content-Type\`, \`application/grpc\`)
+      match: Host(\`$ARGOCD_HOSTNAME\`) && Header(\`Content-Type\`, \`application/grpc\`)
       priority: 11
       services:
         - name: argocd-server
@@ -45,5 +47,5 @@ kubectl -n argocd rollout restart deployment argocd-server
 echo "Waiting for ArgoCD to be ready..."
 kubectl wait --for=condition=available --timeout=300s deployment/argocd-server -n argocd
 echo
-echo "ArgoCD URL: https://argocd.lab.vigne.com.br"
+echo "ArgoCD URL: https://$ARGOCD_HOSTNAME"
 echo "ArgoCD Admin Password: $(kubectl -n argocd get secret argocd-initial-admin-secret -o json | jq -r .data.password | base64 -d)"
